@@ -18,6 +18,12 @@ you launch. Every release is also listed under [Releases](https://github.com/bym
 2. Run the Launcher & hit install
 3. Put on your headset, then hit Launch in VR.
 
+## Linux / Proton
+
+Linux is not officially supported. Community testers have the mod running under Proton - same launcher, same files - with
+one extra Wine setting (a `xinput1_3` DLL override); the recipe they verified, with what has and has not been tested, is
+in [docs/linux.md](docs/linux.md).
+
 ## Credits
 
 I'd like to thank the following people for their assistance & contributions to the mod, you're all loved:
