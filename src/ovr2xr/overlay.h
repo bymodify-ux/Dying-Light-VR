@@ -54,7 +54,7 @@ bool OverlayRender(XrSpace viewSpace, XrSpace appSpace, XrTime displayTime,
 // fire_reticle_3d: the two eye poses THIS frame's projection layer is declared with (appSpace, after the auto-pitch),
 // set by ovr2xr.cpp just before OverlayRender - the gun dot is placed relative to them so it moves with the game image.
 // `valid` false = no projection layer this frame (nothing to anchor to, no dot). Render thread only.
-void OverlaySetDeclaredViews(bool valid, const XrPosef& left, const XrPosef& right);
+void OverlaySetDeclaredViews(bool valid, const XrPosef& left, const XrPosef& right, const XrFovf& rightFov);
 
 // grapple_reticle_3d: the grapple's icon on its own quad (world-locked at the grapple target). False = nothing to submit.
 // Call after OverlayRender, same frame. Not drawn while the settings panel is open.
@@ -115,6 +115,11 @@ void OverlayRenderToMirror(ID3D11Texture2D* dst);
 // instead of the opaque write.
 int OverlayDrawImageToTarget(ID3D11RenderTargetView* rtv, float w, float h, ID3D11ShaderResourceView* srv, const float uv[4],
                              bool premultiplied = false);
+
+// Added by AngelWolf 2026-11-26
+// Draws `quadCount` projected 4-corner quads onto `rtv` (target size w x h) in one ImGui draw call.
+int OverlayDrawQuadToTarget(ID3D11RenderTargetView* rtv, float w, float h, ID3D11ShaderResourceView* srv,
+    const float* pts, const float* uvs, int blendMode = 2, int quadCount = 1);
 
 void OverlayShutdown();
 

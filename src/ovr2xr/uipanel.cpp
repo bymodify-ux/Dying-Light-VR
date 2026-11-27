@@ -393,7 +393,8 @@ static int RenderMenu(XrSpace appSpace, bool viewsValid, const XrPosef* eyes, co
         rc1 = g_copy(g_images[index].texture, 1, r.x, r.y, r.w, r.h, r.w);
         // The desktop window shows the menu too (deskmirror.h DrawPanel; Jay 2026-11-14, trace 20261114_1125): eye 0's half, read here
         // while the image is still acquired. Only when the window picture was redrawn this submit (deskmirror::SetFresh).
-        if (rc == 0 && rc1 == 0) { ::dlvr::deskmirror::DrawPanel(g_device, g_images[index].texture, r.w, r.h); }
+        // Removed by AngelWolf 2026-11-26: rendered in 3D perspective via DrawQuadLayer below
+        // if (rc == 0 && rc1 == 0) { ::dlvr::deskmirror::DrawPanel(g_device, g_images[index].texture, r.w, r.h); }
     }
     XrSwapchainImageReleaseInfo ri{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
     xrReleaseSwapchainImage_(g_sc, &ri);
@@ -476,6 +477,12 @@ static int RenderMenu(XrSpace appSpace, bool viewsValid, const XrPosef* eyes, co
         q.pose.position = { sPos[0] + mAx[0] * dxE[e] + mAy[0] * dyE[e], sPos[1] + mAx[1] * dxE[e] + mAy[1] * dyE[e],
                             sPos[2] + mAx[2] * dxE[e] + mAy[2] * dyE[e] };
         q.size = { widthE[e], heightE[e] };
+    }
+
+    // Added by AngelWolf 2026-11-26: mirror the right-eye in-game menu panel quad onto the desktop window
+    if (g_device && index < g_images.size()) {
+        ::dlvr::deskmirror::DrawQuadLayer(g_device, g_images[index].texture, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            out[1], eyes[1], fov1, 1);
     }
     ++g_shown;
     Periodic();
@@ -973,6 +980,12 @@ int RenderHud(XrSpace appSpace, bool viewsValid, const XrPosef* eyes, const XrQu
         g_wfE[3] = 0.5f * height - v;
         g_wfAt = now;
         ReleaseSRWLockExclusive(&g_wfLock);
+    }
+
+    // Added by AngelWolf 2026-11-26: mirror the right-eye floating HUD / weapon wheel quad onto the desktop window
+    if (g_device && index < g_images.size()) {
+        ::dlvr::deskmirror::DrawQuadLayer(g_device, g_images[index].texture, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            out[1], eyes[1], fov1, 1);
     }
     ++g_hShown;
     HudPeriodic();

@@ -8,6 +8,8 @@
 #include <d3d11_1.h>   // ID3D11DeviceContext1::ClearView - the 3b outline box
 
 #include "../common/log.h"
+// Added by AngelWolf 2026-11-26
+#include "deskmirror.h"    // DrawQuadLayer - mirror Stage 2 wrist quads + 3b placement box/beams
 #include "aimhook.h"       // AimMirrorYaw - the arm anchor's room mapping (as looting.cpp HandWorld)
 #include "boneblend.h"     // RigArmAnchorRead - the drawn forearm / hand (arm anchor)
 #include "camhook.h"       // CamHookGetOpenXrToGameYaw / CamHookGetRenderedViewMatrix - the arm anchor's room mapping
@@ -1522,6 +1524,24 @@ int Render(XrSpace appSpace, bool viewsValid, const XrPosef eyes[2], int room, X
             --extras;
         }
     }
+
+    // Added by AngelWolf: 2026-11-26
+    // Mirror the Stage 2 wrist quads + Stage 3b box/beams onto the desktop window (right eye, kMirrorView == 1)
+    if (nOut > 0 && g_device && index < g_images.size() && viewsValid && g_declOk[1]) {
+        for (int qi = 0; qi < nOut; ++qi) {
+            XrCompositionLayerQuad mq = out[qi];
+            if (mq.space != appSpace) {
+                const Hand h = (mq.space == ControllerGripSpace(kLeftHand)) ? kLeftHand : kRightHand;
+                XrPosef grip{};
+                if (!GripTracked(h, grip)) { continue; }
+                mq.pose = PoseMul(grip, mq.pose);
+                mq.space = appSpace;
+            }
+            ::dlvr::deskmirror::DrawQuadLayer(g_device, g_images[index].texture, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                mq, eyes[1], g_declFov[1], 1);
+        }
+    }
+
     return nOut;
 }
 

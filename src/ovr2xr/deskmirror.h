@@ -11,6 +11,8 @@
 // Setting `mirror` (Timing tab): on = live, at most kLivePerSec per second. Off = only the overlay's backdrop (every 8th submit while the
 // mod menu is open, the rule ovr2xr.cpp has always had). Render thread only (ovr_SubmitFrame).
 #include <d3d11.h>
+// Added by AngelWolf 2026-11-26
+#include <openxr/openxr.h>
 
 namespace dlvr {
 namespace deskmirror {
@@ -36,6 +38,10 @@ bool Draw(ID3D11Device* device, ID3D11Texture2D* mirror, ID3D11Texture2D* shown,
 // mirror was not refreshed this submit (a translucent menu over a stale picture would darken it frame after frame). Render thread.
 void SetFresh(ID3D11Texture2D* mirror);
 void DrawPanel(ID3D11Device* device, ID3D11Texture2D* panelImage, int w, int h);
+
+// Added by AngelWolf 2026-11-26
+void DrawQuadLayer(ID3D11Device* device, ID3D11Texture2D* tex, DXGI_FORMAT fmt,
+    const XrCompositionLayerQuad& quad, const XrPosef& eyePose, const XrFovf& eyeFov, int blendMode = 2);
 
 // Session teardown, before the mirror textures are released: drops every cached view.
 void Shutdown();

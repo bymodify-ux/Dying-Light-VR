@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 
@@ -153,6 +154,26 @@ ID3D11RenderTargetView* RtvFor(ID3D11Device* dev, ID3D11Texture2D* mirror)
     return g_rtv;
 }
 
+//Added by AngelWolf 2026-11-26
+XrVector3f QuatRotate(const XrQuaternionf& q, const XrVector3f& v)
+{
+    const float tx = 2.0f * (q.y * v.z - q.z * v.y);
+    const float ty = 2.0f * (q.z * v.x - q.x * v.z);
+    const float tz = 2.0f * (q.x * v.y - q.y * v.x);
+    return XrVector3f{
+        v.x + q.w * tx + (q.y * tz - q.z * ty),
+        v.y + q.w * ty + (q.z * tx - q.x * tz),
+        v.z + q.w * tz + (q.x * ty - q.y * tx)
+    };
+}
+
+// Added by AngelWolf 2026-11-26
+XrVector3f QuatUnrotate(const XrQuaternionf& q, const XrVector3f& v)
+{
+    const XrQuaternionf inv{ -q.x, -q.y, -q.z, q.w };
+    return QuatRotate(inv, v);
+}
+
 }  // namespace
 
 int Due(bool live, bool backdropDue)
@@ -277,7 +298,8 @@ void DrawPanel(ID3D11Device* device, ID3D11Texture2D* panelImage, int w, int h)
     // Not redrawn this submit / no crop yet / no panel image: nothing (the normal skip on submits the 60 / s clock did not take).
     if (!g_fresh || !g_haveCrop || !device || !panelImage || w <= 0 || h <= 0) { return; }
     ID3D11Texture2D* const mirror = g_fresh;
-    g_fresh = nullptr;   // at most one panel draw per refreshed picture
+    // Removed by AngelWolf 2026-11-26
+    // g_fresh = nullptr;   // at most one panel draw per refreshed picture
     ID3D11RenderTargetView* rtv = RtvFor(device, mirror);
     D3D11_TEXTURE2D_DESC pd{};
     panelImage->GetDesc(&pd);
@@ -308,6 +330,101 @@ void DrawPanel(ID3D11Device* device, ID3D11Texture2D* panelImage, int w, int h)
             "-> over the window, premultiplied", pd.Width, pd.Height, static_cast<int>(pd.Format),
             static_cast<int>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB), kMirrorView, w, h, x, y, cw, ch);
     }
+}
+
+// Added by AngelWolf 2026-11-26
+// Projects a 3D OpenXR quad layer (`quad`, whose space matches `eyePose` — e.g. appSpace) into kMirrorView's declared pose/FOV,
+// remaps through this submit's desktop window crop (g_cropF), and composites `tex` onto the fresh mirror texture.
+// Subdivides into a 4x4 grid so ImDrawList's 2D affine UV interpolation does not bend/fold angled panels.
+// blendMode: 0 = opaque, 1 = premultiplied alpha, 2 = straight alpha.
+void DrawQuadLayer(ID3D11Device* device, ID3D11Texture2D* tex, DXGI_FORMAT fmt,
+    const XrCompositionLayerQuad& quad, const XrPosef& eyePose, const XrFovf& eyeFov, int blendMode)
+{
+    if (!g_fresh || !g_haveCrop || !device || !tex || !(g_mirW > 0.0f) || !(g_mirH > 0.0f)) { return; }
+    if (quad.eyeVisibility == XR_EYE_VISIBILITY_LEFT) { return; }
+
+    D3D11_TEXTURE2D_DESC td{};
+    tex->GetDesc(&td);
+    if (td.Width == 0 || td.Height == 0) { return; }
+
+    ID3D11RenderTargetView* rtv = RtvFor(device, g_fresh);
+    ID3D11ShaderResourceView* srv = rtv ? SrvFor(device, tex, fmt) : nullptr;
+    if (!rtv || !srv) { return; }
+
+    const float tanL = tanf(eyeFov.angleLeft);
+    const float tanR = tanf(eyeFov.angleRight);
+    const float tanU = tanf(eyeFov.angleUp);
+    const float tanD = tanf(eyeFov.angleDown);
+    const float spanX = tanR - tanL;
+    const float spanY = tanU - tanD;
+    if (!(spanX > 0.0f) || !(spanY > 0.0f) || !(g_cropF[2] > 0.0) || !(g_cropF[3] > 0.0)) { return; }
+
+    const float u0 = static_cast<float>(quad.subImage.imageRect.offset.x) / static_cast<float>(td.Width);
+    const float v0 = static_cast<float>(quad.subImage.imageRect.offset.y) / static_cast<float>(td.Height);
+    const float u1 = static_cast<float>(quad.subImage.imageRect.offset.x + quad.subImage.imageRect.extent.width) / static_cast<float>(td.Width);
+    const float v1 = static_cast<float>(quad.subImage.imageRect.offset.y + quad.subImage.imageRect.extent.height) / static_cast<float>(td.Height);
+
+    constexpr int kGrid = 16;
+    float gridPt[kGrid + 1][kGrid + 1][2] = {};
+    float gridUv[kGrid + 1][kGrid + 1][2] = {};
+
+    for (int gy = 0; gy <= kGrid; ++gy) {
+        const float tyFrac = static_cast<float>(gy) / static_cast<float>(kGrid);
+        const float localY = (0.5f - tyFrac) * quad.size.height;
+        const float uvV = v0 + (v1 - v0) * tyFrac;
+
+        for (int gx = 0; gx <= kGrid; ++gx) {
+            const float txFrac = static_cast<float>(gx) / static_cast<float>(kGrid);
+            const float localX = (txFrac - 0.5f) * quad.size.width;
+            const float uvU = u0 + (u1 - u0) * txFrac;
+
+            const XrVector3f rot = QuatRotate(quad.pose.orientation, XrVector3f{ localX, localY, 0.0f });
+            const XrVector3f world{ quad.pose.position.x + rot.x,
+                                    quad.pose.position.y + rot.y,
+                                    quad.pose.position.z + rot.z };
+            const XrVector3f rel{ world.x - eyePose.position.x,
+                                  world.y - eyePose.position.y,
+                                  world.z - eyePose.position.z };
+            const XrVector3f eye = QuatUnrotate(eyePose.orientation, rel);
+            if (eye.z >= -0.01f) { return; }
+
+            const float invDepth = 1.0f / -eye.z;
+            const float tx = eye.x * invDepth;
+            const float ty = eye.y * invDepth;
+
+            const float eyeU = (tx - tanL) / spanX;
+            const float eyeV = (tanU - ty) / spanY;
+
+            const float mirU = static_cast<float>((eyeU - g_cropF[0]) / g_cropF[2]);
+            const float mirV = static_cast<float>((eyeV - g_cropF[1]) / g_cropF[3]);
+
+            gridPt[gy][gx][0] = mirU * g_mirW;
+            gridPt[gy][gx][1] = mirV * g_mirH;
+            gridUv[gy][gx][0] = uvU;
+            gridUv[gy][gx][1] = uvV;
+        }
+    }
+
+    float pts[kGrid * kGrid * 8];
+    float uvs[kGrid * kGrid * 8];
+    int q = 0;
+    for (int gy = 0; gy < kGrid; ++gy) {
+        for (int gx = 0; gx < kGrid; ++gx) {
+            float* p = pts + q * 8;
+            float* u = uvs + q * 8;
+            p[0] = gridPt[gy][gx][0];         p[1] = gridPt[gy][gx][1];
+            p[2] = gridPt[gy][gx + 1][0];     p[3] = gridPt[gy][gx + 1][1];
+            p[4] = gridPt[gy + 1][gx + 1][0]; p[5] = gridPt[gy + 1][gx + 1][1];
+            p[6] = gridPt[gy + 1][gx][0];     p[7] = gridPt[gy + 1][gx][1];
+
+            u[0] = gridUv[gy][gx][0];         u[1] = gridUv[gy][gx][1];
+            u[2] = gridUv[gy][gx + 1][0];     u[3] = gridUv[gy][gx + 1][1];
+            u[4] = gridUv[gy + 1][gx + 1][0]; u[5] = gridUv[gy + 1][gx + 1][1];
+            u[6] = gridUv[gy + 1][gx][0];     u[7] = gridUv[gy + 1][gx][1];
+            ++q;
+        }
+    }
+    OverlayDrawQuadToTarget(rtv, g_mirW, g_mirH, srv, pts, uvs, blendMode, q);    
 }
 
 void Shutdown()

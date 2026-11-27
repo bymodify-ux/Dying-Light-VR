@@ -14,6 +14,8 @@
 #define DLVR_LS_GAME_SLOT(rva) (rva)   // the DEV tree: Steam rvas only, as the rest of this tree
 #endif
 #include "loadscreen_logic.h"
+// Added by AngelWolf 2026-11-26
+#include "deskmirror.h"
 #include "uipanel.h"   // uipanel::GameEyeTan - each eye's own frustum for the HUD box (INV-735)
 #include "uipin.h"   // the level walk: the loading module's screens, the HUD, a menu (amendment 1)
 
@@ -418,6 +420,19 @@ int Render(XrSpace appSpace, bool viewsValid, bool posesValid, const XrPosef eye
         ++g_shown;
         g_st.shown = true;
     }
+
+	// Added by AngelWolf 2026-11-26
+    // Mirror the loading screen onto the desktop window: clear to the void's black backdrop, then project the right-eye panel quad.
+    if (n > 0 && g_device && index < g_images.size()) {
+        for (int qi = 0; qi < n; ++qi) {
+            if (out[qi].eyeVisibility == XR_EYE_VISIBILITY_RIGHT) {
+                ::dlvr::deskmirror::DrawQuadLayer(g_device, g_images[index].texture, static_cast<DXGI_FORMAT>(g_eyeFmt[0]),
+                    out[qi], eyes[1], fov0, 0);
+                break;
+            }
+        }
+    }
+
     return n;
 }
 

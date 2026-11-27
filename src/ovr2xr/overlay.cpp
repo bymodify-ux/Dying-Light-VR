@@ -15,6 +15,7 @@
 
 #include "../common/log.h"
 #include "aimhook.h"
+#include "deskmirror.h"
 #include "armfit.h"       // ArmFitStart / ArmFitStatus - the VR Comfort tab's "Arm calibration" node
 #include "calibscreen.h"  // CalibScreenOpen / CalibScreenActive - the calibration screen (build A)
 #include "boneblend.h"    // SnapTurnStatus / ComfortTurnMode - the VR Comfort tab's status line
@@ -4306,6 +4307,64 @@ struct GrappleWin { ULONGLONG start = 0; unsigned can = 0, refused = 0, none = 0
 GrappleWin g_gpw;
 }  // namespace
 
+namespace {
+    XrFovf g_declRFov{};
+    XrSpace g_lastAppSpace = XR_NULL_HANDLE;
+    XrTime g_lastDisplayTime = 0;
+
+    XrPosef MirrorPoseMul(const XrPosef& a, const XrPosef& b)
+    {
+        const float tx = 2.0f * (a.orientation.y * b.position.z - a.orientation.z * b.position.y);
+        const float ty = 2.0f * (a.orientation.z * b.position.x - a.orientation.x * b.position.z);
+        const float tz = 2.0f * (a.orientation.x * b.position.y - a.orientation.y * b.position.x);
+        XrPosef out{};
+        out.orientation = {
+            a.orientation.w * b.orientation.x + a.orientation.x * b.orientation.w + a.orientation.y * b.orientation.z - a.orientation.z * b.orientation.y,
+            a.orientation.w * b.orientation.y - a.orientation.x * b.orientation.z + a.orientation.y * b.orientation.w + a.orientation.z * b.orientation.x,
+            a.orientation.w * b.orientation.z + a.orientation.x * b.orientation.y - a.orientation.y * b.orientation.x + a.orientation.z * b.orientation.w,
+            a.orientation.w * b.orientation.w - a.orientation.x * b.orientation.x - a.orientation.y * b.orientation.y - a.orientation.z * b.orientation.z
+        };
+        out.position = {
+            a.position.x + b.position.x + a.orientation.w * tx + (a.orientation.y * tz - a.orientation.z * ty),
+            a.position.y + b.position.y + a.orientation.w * ty + (a.orientation.z * tx - a.orientation.x * tz),
+            a.position.z + b.position.z + a.orientation.w * tz + (a.orientation.x * ty - a.orientation.y * tx)
+        };
+        return out;
+    }
+}  // namespace
+
+void MirrorOverlayQuad(ID3D11Texture2D* tex, DXGI_FORMAT fmt, const XrCompositionLayerQuad& quad, int blendMode)
+{
+    if (!g_declValid || !g.device || !tex) { return; }
+    XrCompositionLayerQuad mq = quad;
+    if (mq.space != g_lastAppSpace) {
+        if (mq.space == XR_NULL_HANDLE || g_lastAppSpace == XR_NULL_HANDLE || !xrLocateSpace_) { return; }
+        XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
+        const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (XR_FAILED(xrLocateSpace_(mq.space, g_lastAppSpace, g_lastDisplayTime, &loc)) || (loc.locationFlags & need) != need) {
+            return;
+        }
+        mq.pose = MirrorPoseMul(loc.pose, mq.pose);
+        mq.space = g_lastAppSpace;
+    }
+    ::dlvr::deskmirror::DrawQuadLayer(g.device, tex, fmt, mq, g_declR, g_declRFov, blendMode);
+}
+
+void MirrorOverlayRtv(ID3D11RenderTargetView* rtv, const XrCompositionLayerQuad& quad, int blendMode)
+{
+    if (!rtv) { return; }
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    ID3D11Texture2D* tex = nullptr;
+    if (res && SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+        D3D11_RENDER_TARGET_VIEW_DESC rd{};
+        rtv->GetDesc(&rd);
+        MirrorOverlayQuad(tex, rd.Format, quad, blendMode);
+        tex->Release();
+    }
+    if (res) { res->Release(); }
+}
+
 // grapple_reticle_3d: the game's grapple icon ("go" = can grapple, "no" = refused) on its own quad at the grapple target.
 bool OverlayRenderGrapple(XrSpace appSpace, XrCompositionLayerQuad* out)
 {
@@ -4397,6 +4456,7 @@ bool OverlayRenderGrapple(XrSpace appSpace, XrCompositionLayerQuad* out)
             "icon %.2f x %.2f deg (FOV %.1f, scale %.2f) | quad %.3f m",
             gd.state == 1 ? "can grapple (go)" : "refused (no)", gd.dist, vl, 2.0f * hw, 2.0f * hh, fov, GrappleReticleScale, size);
     }
+    MirrorOverlayRtv(g.rtvs2[index], *out, 2);
     return true;
 }
 
@@ -4408,10 +4468,11 @@ namespace {
 // would leave the panel's window un-submitted for one frame: ImGui 1.92.8 NewFrame (imgui.cpp:5752) then moves nav focus
 // off it, Begin re-"appears" it (7465/7830), an active slider not kept alive is cleared, and io.DeltaTime would be counted
 // twice (nav / key repeat at 2x). nullptr = the old path, unchanged. COST with ownList: one draw-list fill + one quad.
-bool RenderCalibQuadInto(XrSwapchain& sc, std::vector<XrSwapchainImageD3D11KHR>& images,
-                         std::vector<ID3D11RenderTargetView*>& rtvs, bool& tried, const char* what, XrSpace space,
-                         const XrPosef& pose, float sizeM, bool square, OverlayDrawFn draw, const void* user,
-                         XrCompositionLayerQuad* out, ImDrawList* ownList = nullptr, const char* refusedTail = nullptr)
+    bool RenderCalibQuadInto(XrSwapchain& sc, std::vector<XrSwapchainImageD3D11KHR>& images,
+        std::vector<ID3D11RenderTargetView*>& rtvs, bool& tried, const char* what, XrSpace space,
+        const XrPosef& pose, float sizeM, bool square, OverlayDrawFn draw, const void* user,
+        XrCompositionLayerQuad* out, ImDrawList* ownList = nullptr, const char* refusedTail = nullptr,
+        uint32_t* outIndex = nullptr)
 {
     if (!g.initialised || !out || !draw || space == XR_NULL_HANDLE) { return false; }
     // The draw-list shared data (white-pixel UV, clip rect, AA flags) is filled by the first NewFrame; none yet = nothing.
@@ -4486,6 +4547,8 @@ bool RenderCalibQuadInto(XrSwapchain& sc, std::vector<XrSwapchainImageD3D11KHR>&
         out->size = { sizeM, sizeM * static_cast<float>(kPanelH) / static_cast<float>(kPanelW) };
     }
     out->pose = pose;
+    if (ownList != g.titleList && !outIndex) { MirrorOverlayRtv(rtvs[index], *out, 2); }
+    if (outIndex) { *outIndex = index; }
     return true;
 }
 }  // namespace
@@ -4615,9 +4678,15 @@ int OverlayRenderHolsterRings(XrSpace appSpace, XrCompositionLayerQuad* out, int
             pose.orientation = { cy * sp, sy * cp, -sy * sp, cy * cp };
         }
         s_alpha[i] = alpha[i];
+        uint32_t ringIdx = 0;
         if (RenderCalibQuadInto(g.swapchainRing[i], g.imagesRing[i], g.rtvsRing[i], g.ringTried[i], "holster ring", appSpace, pose,
-                                2.0f * radius[i], true, DrawHolsterRing, &s_alpha[i], &out[k], nullptr,
-                                "that holster ring is not shown; the holsters still work")) {
+            2.0f * radius[i], true, DrawHolsterRing, &s_alpha[i], &out[k], nullptr,
+            "that holster ring is not shown; the holsters still work", &ringIdx)) {
+            // Added by AngelWolf 2026-11-26: mirror visible holster ring quad onto desktop window
+            out[k].eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            if (ringIdx < g.rtvsRing[i].size()) {
+                MirrorOverlayRtv(g.rtvsRing[i][ringIdx], out[k], 1);
+            }
             ++k;
         }
     }
@@ -4736,14 +4805,18 @@ bool OverlayRenderTitle(XrSpace viewSpace, XrSpace appSpace, XrTime time, XrComp
         pose = world;
     }
     if (!g.titleList) { g.titleList = IM_NEW(ImDrawList)(ImGui::GetDrawListSharedData()); }
+    uint32_t titleIdx = 0;
     if (!RenderCalibQuadInto(g.swapchain9, g.images9, g.rtvs9, g.titleTried, "menu title", space, pose, OverlayWidth(), false,
-                             DrawMenuTitle, t, out, g.titleList, "the menu title is not shown above the panel")) {
+        DrawMenuTitle, t, out, g.titleList, "the menu title is not shown above the panel", &titleIdx)) {
         return false;
     }
     // Only the title's rectangle of the canvas, at the panel's scale.
     out->subImage.imageRect.offset = { 0, 0 };
     out->subImage.imageRect.extent = { tw, th };
     out->size = { tw * mpp, th * mpp };
+    if (titleIdx < g.rtvs9.size()) {
+        MirrorOverlayRtv(g.rtvs9[titleIdx], *out, 2);
+    }
     return true;
 }
 
@@ -4828,6 +4901,11 @@ bool RenderCalibImageInto(XrSwapchain& sc, std::vector<XrSwapchainImageD3D11KHR>
         out[k].size = { sizeM, sizeM };
         out[k].pose = poses[k];
     }
+
+    for (int k = 0; k < n; ++k) {
+        MirrorOverlayQuad(src, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, out[k], 1);
+    }
+
     return true;
 }
 }  // namespace
@@ -4856,16 +4934,20 @@ bool OverlayCalibFloorImageRefused()
     return g.floorImgTried && g.swapchain5 == XR_NULL_HANDLE;
 }
 
-void OverlaySetDeclaredViews(bool valid, const XrPosef& left, const XrPosef& right)
+void OverlaySetDeclaredViews(bool valid, const XrPosef& left, const XrPosef& right, const XrFovf& rightFov)
 {
     g_declValid = valid;
     g_declL = left;
     g_declR = right;
+    g_declRFov = rightFov;
 }
 
 bool OverlayRender(XrSpace viewSpace, XrSpace appSpace, XrTime displayTime,
                    XrCompositionLayerQuad* out)
 {
+    g_lastAppSpace = appSpace;
+    g_lastDisplayTime = displayTime;
+
     if (!g.initialised || !out || viewSpace == XR_NULL_HANDLE) {
         return false;
     }
@@ -4940,6 +5022,10 @@ bool OverlayRender(XrSpace viewSpace, XrSpace appSpace, XrTime displayTime,
         out->pose = world;
     }
     out->size = { width, height };
+    // Added by AngelWolf 2026-11-26: mirror the mod menu / reticle quad onto the desktop window
+    if (index < g.rtvs.size()) {
+        MirrorOverlayRtv(g.rtvs[index], *out, 2);
+    }
     return true;
 }
 
@@ -4994,6 +5080,56 @@ int OverlayDrawImageToTarget(ID3D11RenderTargetView* rtv, float w, float h, ID3D
     g_mirrorList->PushClipRect(ImVec2(0.0f, 0.0f), ImVec2(w, h), false);
     g_mirrorList->AddCallback(premultiplied ? MirrorPremulBlend : MirrorOpaqueBlend, nullptr);
     g_mirrorList->AddImage(tex, ImVec2(0.0f, 0.0f), ImVec2(w, h), ImVec2(uv[0], uv[1]), ImVec2(uv[2], uv[3]), IM_COL32_WHITE);
+    dd.Clear();
+    dd.Valid = true;
+    dd.DisplayPos = ImVec2(0.0f, 0.0f);
+    dd.DisplaySize = ImVec2(w, h);
+    dd.FramebufferScale = ImVec2(1.0f, 1.0f);
+    dd.AddDrawList(g_mirrorList);
+    g.context->OMSetRenderTargets(1, &rtv, nullptr);
+    ImGui_ImplDX11_RenderDrawData(&dd);
+    return 0;
+}
+
+// Added by AngelWolf 2026-11-26
+int OverlayDrawQuadToTarget(ID3D11RenderTargetView* rtv, float w, float h, ID3D11ShaderResourceView* srv,
+    const float* pts, const float* uvs, int blendMode, int quadCount)
+{
+    if (blendMode == 1 && !g_mirrorPremulBlend && g.device) {
+        D3D11_BLEND_DESC bd{};
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (FAILED(g.device->CreateBlendState(&bd, &g_mirrorPremulBlend))) { g_mirrorPremulBlend = nullptr; }
+    }
+    if (blendMode == 1 && !g_mirrorPremulBlend) { return 3; }
+    if (!g.initialised || !g.context || !rtv || !srv || !pts || !uvs || quadCount <= 0 || !(w > 0.0f) || !(h > 0.0f)) { return 1; }
+    if (ImGui::GetFrameCount() <= 0) { ImGui_ImplDX11_NewFrame(); }
+    if (!g_mirrorList) { g_mirrorList = IM_NEW(ImDrawList)(ImGui::GetDrawListSharedData()); }
+    static ImDrawData dd;
+    g_mirrorList->_ResetForNewFrame();
+    const ImTextureRef tex(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(srv)));
+    g_mirrorList->PushTexture(tex);
+    g_mirrorList->PushClipRect(ImVec2(0.0f, 0.0f), ImVec2(w, h), false);
+    if (blendMode == 0) {
+        g_mirrorList->AddCallback(MirrorOpaqueBlend, nullptr);
+    }
+    else if (blendMode == 1) {
+        g_mirrorList->AddCallback(MirrorPremulBlend, nullptr);
+    }
+    for (int q = 0; q < quadCount; ++q) {
+        const float* p = pts + q * 8;
+        const float* u = uvs + q * 8;
+        g_mirrorList->AddImageQuad(tex,
+            ImVec2(p[0], p[1]), ImVec2(p[2], p[3]), ImVec2(p[4], p[5]), ImVec2(p[6], p[7]),
+            ImVec2(u[0], u[1]), ImVec2(u[2], u[3]), ImVec2(u[4], u[5]), ImVec2(u[6], u[7]),
+            IM_COL32_WHITE);
+    }
     dd.Clear();
     dd.Valid = true;
     dd.DisplayPos = ImVec2(0.0f, 0.0f);

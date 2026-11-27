@@ -11319,8 +11319,27 @@ ovr_SubmitFrame(ovrSession session, long long frameIndex,
         const bool wouldShow = !::dlvr::CalibScreenVoid() && !::dlvr::loadscreen::SkipProjection(::dlvr::CalibScreenVoid());
         const bool mayShow = fovNoted ? (wouldShow && !g_liveFov.lastHidden) : dlvr::eyefov::NoteSubmit(g_liveFov, wouldShow);
         fovNoted = true;
+        
         if (mayShow) {
             layers[submitted++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
+        }
+        if (!mayShow && mirrorRefreshed && s->device && !s->mirrors.empty() && s->mirrors[0]->tex) {
+            ID3D11RenderTargetView* voidRtv = nullptr;
+            D3D11_TEXTURE2D_DESC mtd{};
+            s->mirrors[0]->tex->GetDesc(&mtd);
+            D3D11_RENDER_TARGET_VIEW_DESC mrd{};
+            mrd.Format = mtd.Format;
+            mrd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            if (SUCCEEDED(s->device->CreateRenderTargetView(s->mirrors[0]->tex, &mrd, &voidRtv)) && voidRtv) {
+                ID3D11DeviceContext* ctx = nullptr;
+                s->device->GetImmediateContext(&ctx);
+                if (ctx) {
+                    const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+                    ctx->ClearRenderTargetView(voidRtv, black);
+                    ctx->Release();
+                }
+                voidRtv->Release();
+            }
         }
     }
     if (!fovNoted) {
@@ -11361,7 +11380,7 @@ ovr_SubmitFrame(ovrSession session, long long frameIndex,
     RttiUpdateCameras();
     // fire_reticle_3d anchors the gun dot to the poses the game image is declared with THIS frame (proj.viewCount is
     // set only when a usable projection layer was built above).
-    OverlaySetDeclaredViews(proj.viewCount == 2, projViews[0].pose, projViews[1].pose);
+    ::dlvr::OverlaySetDeclaredViews(proj.viewCount == 2, projViews[0].pose, projViews[1].pose, projViews[1].fov);
     // MENU PANEL (ui_panel_menus, SPEC-UI-MENU-PANEL-2026-10-11): while a menu shows, the bracketed sprite pass goes on a
     // room-fixed quad. Directly after the game image and UNDER the settings panel and the reticles. Off = one bool test.
     const XrPosef menuEyes[2] = { projViews[0].pose, projViews[1].pose };
@@ -11430,12 +11449,13 @@ ovr_SubmitFrame(ovrSession session, long long frameIndex,
         }
     }
     if (OverlayRender(s->viewSpace, s->appSpace, s->frameState.predictedDisplayTime,
-                      &overlayQuad)) {
+        &overlayQuad)) {
         layers[submitted++] =
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(&overlayQuad);
-        if (mirrorRefreshed && !s->mirrors.empty() && s->mirrors[0]->tex) {
-            OverlayRenderToMirror(s->mirrors[0]->tex);
-        }
+        // Removed by AngelWolf 2026-11-26: mod menu now renders as a 3D perspective quad via MirrorOverlayRtv
+        // if (mirrorRefreshed && !s->mirrors.empty() && s->mirrors[0]->tex) {
+        //     OverlayRenderToMirror(s->mirrors[0]->tex);
+        // }
     }
     // The 3D grapple icon (trace 20261121_2225, Jay: the reticle "keeps disappearing", "definitely ... with the gun out"): the same cap
     // as the other extra quads (kLayerCap - 1 keeps the calibration panel's slot). It was a hard `< 5` - the game image + the HUD
@@ -11480,6 +11500,7 @@ ovr_SubmitFrame(ovrSession session, long long frameIndex,
         ::dlvr::CalibScreenRender(s->viewSpace, s->appSpace, s->frameState.predictedDisplayTime, &calibQuad)) {
         layers[submitted++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&calibQuad);
     }
+    ::dlvr::deskmirror::SetFresh(nullptr);
 
     XrFrameEndInfo ei{ XR_TYPE_FRAME_END_INFO };
     ei.displayTime = s->frameState.predictedDisplayTime;
